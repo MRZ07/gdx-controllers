@@ -19,13 +19,14 @@ package com.badlogic.gdx.controllers.gwt;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.controllers.AbstractControllerManager;
 import com.badlogic.gdx.controllers.ControllerListener;
+import com.badlogic.gdx.controllers.event.ControllerEvent;
+import com.badlogic.gdx.controllers.event.ControllerEventQueue;
 import com.badlogic.gdx.controllers.gwt.support.Gamepad;
 import com.badlogic.gdx.controllers.gwt.support.GamepadButton;
 import com.badlogic.gdx.controllers.gwt.support.GamepadSupport;
 import com.badlogic.gdx.controllers.gwt.support.GamepadSupportListener;
 import com.badlogic.gdx.utils.Array;
 import com.badlogic.gdx.utils.IntMap;
-import com.badlogic.gdx.utils.Pool;
 import com.google.gwt.core.client.JsArray;
 import com.google.gwt.core.client.JsArrayNumber;
 
@@ -33,13 +34,8 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 
 	private final IntMap<GwtController> controllerMap = new IntMap<GwtController>();
 	private final Array<ControllerListener> listeners = new Array<ControllerListener>();
-	private final Array<GwtControllerEvent> eventQueue = new Array<GwtControllerEvent>();
-	private final Pool<GwtControllerEvent> eventPool = new Pool<GwtControllerEvent>() {
-		@Override
-		protected GwtControllerEvent newObject () {
-			return new GwtControllerEvent();
-		}
-	};
+	private final ControllerEventQueue eventQueue = new ControllerEventQueue();
+	private final Object dispatchLock = new Object();
 
 	public GwtControllers () {
 		GamepadSupport.init(this);
@@ -52,56 +48,61 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 			@SuppressWarnings("synthetic-access")
 			@Override
 			public void run () {
-				synchronized (eventQueue) {
-					for (GwtControllerEvent event : eventQueue) {
-						switch (event.type) {
-						case GwtControllerEvent.CONNECTED:
-							controllers.add(event.controller);
-							for (ControllerListener listener : listeners) {
-								listener.connected(event.controller);
+				synchronized (dispatchLock) {
+					eventQueue.drain(new ControllerEventQueue.ControllerEventConsumer() {
+						@Override
+						public void consume(ControllerEvent event) {
+							switch (event.type) {
+								case ControllerEvent.CONNECTED:
+									controllers.add(event.controller);
+									for (ControllerListener listener : listeners) {
+										listener.connected(event.controller);
+									}
+									break;
+								case ControllerEvent.DISCONNECTED:
+									controllers.removeValue(event.controller, true);
+									for (ControllerListener listener : listeners) {
+										listener.disconnected(event.controller);
+									}
+									GwtController disconnectedController = (GwtController)event.controller;
+									for (ControllerListener listener : disconnectedController.getListeners()) {
+										listener.disconnected(disconnectedController);
+									}
+									break;
+								case ControllerEvent.BUTTON_DOWN:
+									GwtController buttonDownController = (GwtController)event.controller;
+									buttonDownController.buttons.put(event.code, event.amount);
+									for (ControllerListener listener : listeners) {
+										if (listener.buttonDown(buttonDownController, event.code)) break;
+									}
+									for (ControllerListener listener : buttonDownController.getListeners()) {
+										if (listener.buttonDown(buttonDownController, event.code)) break;
+									}
+									break;
+								case ControllerEvent.BUTTON_UP:
+									GwtController buttonUpController = (GwtController)event.controller;
+									buttonUpController.buttons.remove(event.code, event.amount);
+									for (ControllerListener listener : listeners) {
+										if (listener.buttonUp(buttonUpController, event.code)) break;
+									}
+									for (ControllerListener listener : buttonUpController.getListeners()) {
+										if (listener.buttonUp(buttonUpController, event.code)) break;
+									}
+									break;
+								case ControllerEvent.AXIS:
+									GwtController axisController = (GwtController)event.controller;
+									axisController.axes[event.code] = event.amount;
+									for (ControllerListener listener : listeners) {
+										if (listener.axisMoved(axisController, event.code, event.amount)) break;
+									}
+									for (ControllerListener listener : axisController.getListeners()) {
+										if (listener.axisMoved(axisController, event.code, event.amount)) break;
+									}
+									break;
+								default:
 							}
-							break;
-						case GwtControllerEvent.DISCONNECTED:
-							controllers.removeValue(event.controller, true);
-							for (ControllerListener listener : listeners) {
-								listener.disconnected(event.controller);
-							}
-							for (ControllerListener listener : event.controller.getListeners()) {
-								listener.disconnected(event.controller);
-							}
-							break;
-						case GwtControllerEvent.BUTTON_DOWN:
-							event.controller.buttons.put(event.code, event.amount);
-							for (ControllerListener listener : listeners) {
-								if (listener.buttonDown(event.controller, event.code)) break;
-							}
-							for (ControllerListener listener : event.controller.getListeners()) {
-								if (listener.buttonDown(event.controller, event.code)) break;
-							}
-							break;
-						case GwtControllerEvent.BUTTON_UP:
-							event.controller.buttons.remove(event.code, event.amount);
-							for (ControllerListener listener : listeners) {
-								if (listener.buttonUp(event.controller, event.code)) break;
-							}
-							for (ControllerListener listener : event.controller.getListeners()) {
-								if (listener.buttonUp(event.controller, event.code)) break;
-							}
-							break;
-						case GwtControllerEvent.AXIS:
-							event.controller.axes[event.code] = event.amount;
-							for (ControllerListener listener : listeners) {
-								if (listener.axisMoved(event.controller, event.code, event.amount)) break;
-							}
-							for (ControllerListener listener : event.controller.getListeners()) {
-								if (listener.axisMoved(event.controller, event.code, event.amount)) break;
-							}
-							break;
-						default:
 						}
-					}
-					eventPool.freeAll(eventQueue);
-					eventQueue.clear();
+					});
 				}
 				Gdx.app.postRunnable(this);
 			}
@@ -110,14 +111,14 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 
 	@Override
 	public void addListener (ControllerListener listener) {
-		synchronized (eventQueue) {
+		synchronized (dispatchLock) {
 			listeners.add(listener);
 		}
 	}
 
 	@Override
 	public void removeListener (ControllerListener listener) {
-		synchronized (eventQueue) {
+		synchronized (dispatchLock) {
 			listeners.removeValue(listener, true);
 		}
 	}
@@ -127,11 +128,8 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 		Gamepad gamepad = Gamepad.getGamepad(index);
 		GwtController controller = new GwtController(gamepad.getIndex(), gamepad.getId());
 		controllerMap.put(index, controller);
-		synchronized (eventQueue) {
-			GwtControllerEvent event = eventPool.obtain();
-			event.type = GwtControllerEvent.CONNECTED;
-			event.controller = controller;
-			eventQueue.add(event);
+		synchronized (dispatchLock) {
+			eventQueue.enqueueConnected(controller);
 		}
 	}
 
@@ -139,12 +137,9 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 	public void onGamepadDisconnected (int index) {
 		GwtController controller = controllerMap.remove(index);
 		if (controller != null) {
-			synchronized (eventQueue) {
+			synchronized (dispatchLock) {
 			    controller.connected = false;
-				GwtControllerEvent event = eventPool.obtain();
-				event.type = GwtControllerEvent.DISCONNECTED;
-				event.controller = controller;
-				eventQueue.add(event);
+				eventQueue.enqueueDisconnected(controller);
 			}
 		}
 	}
@@ -157,17 +152,12 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 			// Determine what changed
 			JsArrayNumber axes = gamepad.getAxes();
 			JsArray<GamepadButton> buttons = gamepad.getButtons();
-			synchronized (eventQueue) {
+			synchronized (dispatchLock) {
 				for (int i = 0, j = axes.length(); i < j; i++) {
 					float oldAxis = controller.getAxis(i);
 					float newAxis = (float)axes.get(i);
 					if (oldAxis != newAxis) {
-						GwtControllerEvent event = eventPool.obtain();
-						event.type = GwtControllerEvent.AXIS;
-						event.controller = controller;
-						event.code = i;
-						event.amount = newAxis;
-						eventQueue.add(event);
+						eventQueue.enqueueAxis(controller, i, newAxis);
 					}
 				}
 				for (int i = 0, j = buttons.length(); i < j; i++) {
@@ -179,12 +169,11 @@ public class GwtControllers extends AbstractControllerManager implements Gamepad
 							continue;
 						}
 
-						GwtControllerEvent event = eventPool.obtain();
-						event.type = newButton >= 0.5f ? GwtControllerEvent.BUTTON_DOWN : GwtControllerEvent.BUTTON_UP;
-						event.controller = controller;
-						event.code = i;
-						event.amount = newButton;
-						eventQueue.add(event);
+						if (newButton >= 0.5f) {
+							eventQueue.enqueueButtonDown(controller, i, newButton);
+						} else {
+							eventQueue.enqueueButtonUp(controller, i, newButton);
+						}
 					}
 				}
 			}

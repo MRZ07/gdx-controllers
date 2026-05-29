@@ -1,6 +1,8 @@
 package com.badlogic.gdx.controllers;
 
 import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.controllers.event.ControllerEvent;
+import com.badlogic.gdx.controllers.event.ControllerEventQueue;
 import com.badlogic.gdx.utils.Array;
 
 import org.robovm.apple.foundation.Foundation;
@@ -14,11 +16,52 @@ import org.robovm.objc.block.VoidBlock1;
 
 public class IosControllerManager extends AbstractControllerManager {
 	private final Array<ControllerListener> listeners = new Array<>();
+	private final ControllerEventQueue eventQueue = new ControllerEventQueue();
+	private final Object dispatchLock = new Object();
 	private boolean initialized = false;
 	private ICadeController iCadeController;
 
 	public IosControllerManager() {
 		listeners.add(new ManageCurrentControllerListener());
+		setupEventQueue();
+	}
+
+	private void setupEventQueue() {
+		new Runnable() {
+			@Override
+			public void run() {
+				synchronized (dispatchLock) {
+					eventQueue.drain(new ControllerEventQueue.ControllerEventConsumer() {
+						@Override
+						public void consume(ControllerEvent event) {
+							switch (event.type) {
+								case ControllerEvent.CONNECTED:
+									controllers.add(event.controller);
+									synchronized (listeners) {
+										for (ControllerListener listener : listeners) {
+											listener.connected(event.controller);
+										}
+									}
+									break;
+								case ControllerEvent.DISCONNECTED:
+									IosController oldReference = (IosController)event.controller;
+									controllers.removeValue(oldReference, true);
+									synchronized (listeners) {
+										for (ControllerListener listener : listeners) {
+											listener.disconnected(oldReference);
+										}
+									}
+									oldReference.dispose();
+									break;
+								default:
+							}
+						}
+					});
+				}
+
+				Gdx.app.postRunnable(this);
+			}
+		}.run();
 	}
 
 	public static void enableICade(UIViewController controller, Selector action) {
@@ -45,11 +88,9 @@ public class IosControllerManager extends AbstractControllerManager {
 			Gdx.app.log("Controllers", "iCade key was pressed, adding iCade controller.");
 
 			iCadeController = new ICadeController();
-			controllers.add(iCadeController);
 
-			synchronized (listeners) {
-				for (ControllerListener listener : listeners)
-					listener.connected(iCadeController);
+			synchronized (dispatchLock) {
+				eventQueue.enqueueConnected(iCadeController);
 			}
 		}
 
@@ -114,11 +155,9 @@ public class IosControllerManager extends AbstractControllerManager {
 
 		if (!alreadyInList) {
 			IosController iosController = new IosController(gcController);
-			controllers.add(iosController);
 
-			synchronized (listeners) {
-				for (ControllerListener listener : listeners)
-					listener.connected(iosController);
+			synchronized (dispatchLock) {
+				eventQueue.enqueueConnected(iosController);
 			}
 		}
 	}
@@ -132,14 +171,9 @@ public class IosControllerManager extends AbstractControllerManager {
 		}
 
 		if (oldReference != null) {
-			controllers.removeValue(oldReference, true);
-
-			synchronized (listeners) {
-				for (ControllerListener listener : listeners)
-					listener.disconnected(oldReference);
+			synchronized (dispatchLock) {
+				eventQueue.enqueueDisconnected(oldReference);
 			}
-
-			oldReference.dispose();
 		}
 	}
 
@@ -173,4 +207,3 @@ public class IosControllerManager extends AbstractControllerManager {
 		}
 	}
 }
-

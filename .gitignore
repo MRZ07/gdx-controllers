@@ -64,6 +64,8 @@ build/
 ## OS Specific
 .DS_Store
 
+.worktrees/
+
 
 local.properties
 

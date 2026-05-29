@@ -45,9 +45,9 @@ public class IosController extends AbstractController {
     private final float[] axisValues;
     private long lastPausePressedMs = 0;
 
-    private CHHapticEngine hapticEngine;
-    private CHHapticPatternPlayer playingHapticPattern;
-    private long vibrationEndMs;
+	private CHHapticEngine hapticEngine;
+	private CHHapticPatternPlayer playingHapticPattern;
+	private long vibrationEndMs;
 
     public IosController(GCController controller) {
         this.controller = controller;
@@ -80,15 +80,23 @@ public class IosController extends AbstractController {
                 }
             });
 
-        if (Foundation.getMajorSystemVersion() >= 14) try {
-            if (controller.getHaptics()!=null) {
-                hapticEngine = controller.getHaptics().createEngine(GCHapticsLocality.Default);
-                hapticEngine.retain();
-            }
-        } catch (Throwable t) {
-            Gdx.app.error("Controllers", "Failed to create haptics engine", t);
-        }
-    }
+		// lazily initialize haptics to keep connect path lightweight
+	}
+
+	private void ensureHapticsEngine() {
+		if (hapticEngine != null || Foundation.getMajorSystemVersion() < 14) {
+			return;
+		}
+
+		try {
+			if (controller.getHaptics()!=null) {
+				hapticEngine = controller.getHaptics().createEngine(GCHapticsLocality.Default);
+				hapticEngine.retain();
+			}
+		} catch (Throwable t) {
+			Gdx.app.error("Controllers", "Failed to create haptics engine", t);
+		}
+	}
 
     @Override
     public void dispose() {
@@ -378,10 +386,11 @@ public class IosController extends AbstractController {
         return controller.getExtendedGamepad() != null ? 4 : 0;
     }
 
-    @Override
-    public boolean canVibrate() {
-        return hapticEngine != null;
-    }
+	@Override
+	public boolean canVibrate() {
+		ensureHapticsEngine();
+		return hapticEngine != null;
+	}
 
     @Override
     public void startVibration(int duration, float strength) {

@@ -20,6 +20,7 @@ public class JamepadControllerManager extends AbstractControllerManager implemen
     private static com.studiohartman.jamepad.ControllerManager controllerManager;
 
     private final CompositeControllerListener compositeListener = new CompositeControllerListener();
+    private JamepadControllerMonitor monitor;
 
     public JamepadControllerManager() {
         compositeListener.addListener(new ManageControllers());
@@ -32,10 +33,10 @@ public class JamepadControllerManager extends AbstractControllerManager implemen
             controllerManager = new com.studiohartman.jamepad.ControllerManager(jamepadConfiguration);
             controllerManager.initSDLGamepad();
 
-            JamepadControllerMonitor monitor = new JamepadControllerMonitor(controllerManager, compositeListener);
-            monitor.run();
+            monitor = new JamepadControllerMonitor(controllerManager, compositeListener);
+            monitor.start();
 
-            Gdx.app.addLifecycleListener(new JamepadShutdownHook(controllerManager));
+            Gdx.app.addLifecycleListener(new JamepadShutdownHook(controllerManager, monitor));
 
             nativeLibInitialized = true;
         }
@@ -66,6 +67,10 @@ public class JamepadControllerManager extends AbstractControllerManager implemen
 
     @Override
     public void dispose() {
+        if (monitor != null) {
+            monitor.stop();
+            monitor = null;
+        }
         controllerManager.quitSDLGamepad();
     }
 

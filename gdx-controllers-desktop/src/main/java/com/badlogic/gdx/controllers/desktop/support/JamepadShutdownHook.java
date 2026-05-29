@@ -5,9 +5,11 @@ import com.studiohartman.jamepad.ControllerManager;
 
 public class JamepadShutdownHook implements LifecycleListener {
     private final ControllerManager controllerManager;
+    private final JamepadControllerMonitor monitor;
 
-    public JamepadShutdownHook(ControllerManager controllerManager) {
+    public JamepadShutdownHook(ControllerManager controllerManager, JamepadControllerMonitor monitor) {
         this.controllerManager = controllerManager;
+        this.monitor = monitor;
     }
 
     @Override
@@ -22,6 +24,7 @@ public class JamepadShutdownHook implements LifecycleListener {
 
     @Override
     public void dispose() {
+        monitor.stop();
         controllerManager.quitSDLGamepad();
     }
 }

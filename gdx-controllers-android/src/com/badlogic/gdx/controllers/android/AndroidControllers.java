@@ -28,10 +28,11 @@ import com.badlogic.gdx.LifecycleListener;
 import com.badlogic.gdx.backends.android.AndroidInput;
 import com.badlogic.gdx.controllers.AbstractControllerManager;
 import com.badlogic.gdx.controllers.ControllerListener;
+import com.badlogic.gdx.controllers.event.ControllerEvent;
+import com.badlogic.gdx.controllers.event.ControllerEventQueue;
 import com.badlogic.gdx.utils.Array;
 import com.badlogic.gdx.utils.IntMap;
 import com.badlogic.gdx.utils.IntMap.Entry;
-import com.badlogic.gdx.utils.Pool;
 
 public class AndroidControllers extends AbstractControllerManager implements LifecycleListener, OnKeyListener, OnGenericMotionListener {
 	private final static String TAG = "AndroidControllers";
@@ -39,13 +40,8 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 	public static boolean useNewAxisLogic = true;
 	private final IntMap<AndroidController> controllerMap = new IntMap<AndroidController>();
 	private final Array<ControllerListener> listeners = new Array<ControllerListener>();
-	private final Array<AndroidControllerEvent> eventQueue = new Array<AndroidControllerEvent>();
-	private final Pool<AndroidControllerEvent> eventPool = new Pool<AndroidControllerEvent>() {
-		@Override
-		protected AndroidControllerEvent newObject () {
-			return new AndroidControllerEvent();
-		}
-	};
+	private final ControllerEventQueue eventQueue = new ControllerEventQueue();
+	private final Object dispatchLock = new Object();
 
 	public AndroidControllers() {
 		listeners.add(new ManageCurrentControllerListener());
@@ -71,56 +67,61 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 			@SuppressWarnings("synthetic-access")
 			@Override
 			public void run () {
-				synchronized(eventQueue) {
-					for(AndroidControllerEvent event: eventQueue) {
-						switch(event.type) {
-							case AndroidControllerEvent.CONNECTED:
-								controllers.add(event.controller);
-								for(ControllerListener listener: listeners) {
-									listener.connected(event.controller);
-								}
-								break;
-							case AndroidControllerEvent.DISCONNECTED:
-								controllers.removeValue(event.controller, true);
-								for(ControllerListener listener: listeners) {
-									listener.disconnected(event.controller);
-								}
-								for(ControllerListener listener: event.controller.getListeners()) {
-									listener.disconnected(event.controller);
-								}
-								break;
-							case AndroidControllerEvent.BUTTON_DOWN:
-								event.controller.buttons.put(event.code, event.code);
-								for(ControllerListener listener: listeners) {
-									if(listener.buttonDown(event.controller, event.code)) break;
-								}
-								for(ControllerListener listener: event.controller.getListeners()) {
-									if(listener.buttonDown(event.controller, event.code)) break;
-								}
-								break;
-							case AndroidControllerEvent.BUTTON_UP:
-								event.controller.buttons.remove(event.code, 0);
-								for(ControllerListener listener: listeners) {
-									if(listener.buttonUp(event.controller, event.code)) break;
-								}
-								for(ControllerListener listener: event.controller.getListeners()) {
-									if(listener.buttonUp(event.controller, event.code)) break;
-								}
-								break;
-							case AndroidControllerEvent.AXIS:
-								event.controller.axes[event.code] = event.axisValue;
-								for(ControllerListener listener: listeners) {
-									if(listener.axisMoved(event.controller, event.code, event.axisValue)) break;
-								}
-								for(ControllerListener listener: event.controller.getListeners()) {
-									if(listener.axisMoved(event.controller, event.code, event.axisValue)) break;
-								}
-								break;
-							default:
+				synchronized (dispatchLock) {
+					eventQueue.drain(new ControllerEventQueue.ControllerEventConsumer() {
+						@Override
+						public void consume(ControllerEvent event) {
+							switch(event.type) {
+								case ControllerEvent.CONNECTED:
+									controllers.add(event.controller);
+									for(ControllerListener listener: listeners) {
+										listener.connected(event.controller);
+									}
+									break;
+								case ControllerEvent.DISCONNECTED:
+									controllers.removeValue(event.controller, true);
+									for(ControllerListener listener: listeners) {
+										listener.disconnected(event.controller);
+									}
+									AndroidController disconnectedController = (AndroidController)event.controller;
+									for(ControllerListener listener: disconnectedController.getListeners()) {
+										listener.disconnected(disconnectedController);
+									}
+									break;
+								case ControllerEvent.BUTTON_DOWN:
+									AndroidController buttonDownController = (AndroidController)event.controller;
+									buttonDownController.buttons.put(event.code, event.code);
+									for(ControllerListener listener: listeners) {
+										if(listener.buttonDown(buttonDownController, event.code)) break;
+									}
+									for(ControllerListener listener: buttonDownController.getListeners()) {
+										if(listener.buttonDown(buttonDownController, event.code)) break;
+									}
+									break;
+								case ControllerEvent.BUTTON_UP:
+									AndroidController buttonUpController = (AndroidController)event.controller;
+									buttonUpController.buttons.remove(event.code, 0);
+									for(ControllerListener listener: listeners) {
+										if(listener.buttonUp(buttonUpController, event.code)) break;
+									}
+									for(ControllerListener listener: buttonUpController.getListeners()) {
+										if(listener.buttonUp(buttonUpController, event.code)) break;
+									}
+									break;
+								case ControllerEvent.AXIS:
+									AndroidController axisController = (AndroidController)event.controller;
+									axisController.axes[event.code] = event.amount;
+									for(ControllerListener listener: listeners) {
+										if(listener.axisMoved(axisController, event.code, event.amount)) break;
+									}
+									for(ControllerListener listener: axisController.getListeners()) {
+										if(listener.axisMoved(axisController, event.code, event.amount)) break;
+									}
+									break;
+								default:
+							}
 						}
-					}
-					eventPool.freeAll(eventQueue);
-					eventQueue.clear();
+					});
 				}
 				Gdx.app.postRunnable(this);
 			}
@@ -132,132 +133,79 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 		if((motionEvent.getSource() & InputDevice.SOURCE_CLASS_JOYSTICK) == 0) return false;
 		AndroidController controller = controllerMap.get(motionEvent.getDeviceId());
 		if(controller != null) {
-			synchronized(eventQueue) {
-				if (controller.hasPovAxis()) {
-					float povX = motionEvent.getAxisValue(MotionEvent.AXIS_HAT_X);
-					float povY = motionEvent.getAxisValue(MotionEvent.AXIS_HAT_Y);
-					// map axis movement to dpad buttons
-					if (povX != controller.povX) {
-						if (controller.povX == 1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_UP;
-							event.code = KeyEvent.KEYCODE_DPAD_RIGHT;
-							eventQueue.add(event);
-						} else if (controller.povX == -1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_UP;
-							event.code = KeyEvent.KEYCODE_DPAD_LEFT;
-							eventQueue.add(event);
+				synchronized(dispatchLock) {
+					if (controller.hasPovAxis()) {
+						float povX = motionEvent.getAxisValue(MotionEvent.AXIS_HAT_X);
+						float povY = motionEvent.getAxisValue(MotionEvent.AXIS_HAT_Y);
+						// map axis movement to dpad buttons
+						if (povX != controller.povX) {
+							if (controller.povX == 1f) {
+								eventQueue.enqueueButtonUp(controller, KeyEvent.KEYCODE_DPAD_RIGHT, 0f);
+							} else if (controller.povX == -1f) {
+								eventQueue.enqueueButtonUp(controller, KeyEvent.KEYCODE_DPAD_LEFT, 0f);
+							}
+
+							if (povX == 1f) {
+								eventQueue.enqueueButtonDown(controller, KeyEvent.KEYCODE_DPAD_RIGHT, 1f);
+							} else if (povX == -1f) {
+								eventQueue.enqueueButtonDown(controller, KeyEvent.KEYCODE_DPAD_LEFT, 1f);
+							}
+							controller.povX = povX;
 						}
 
-						if (povX == 1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_DOWN;
-							event.code = KeyEvent.KEYCODE_DPAD_RIGHT;
-							eventQueue.add(event);
-						} else if (povX == -1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_DOWN;
-							event.code = KeyEvent.KEYCODE_DPAD_LEFT;
-							eventQueue.add(event);
-						}
-						controller.povX = povX;
-					}
+						if (povY != controller.povY) {
+							if (controller.povY == 1f) {
+								eventQueue.enqueueButtonUp(controller, KeyEvent.KEYCODE_DPAD_DOWN, 0f);
+							} else if (controller.povY == -1f) {
+								eventQueue.enqueueButtonUp(controller, KeyEvent.KEYCODE_DPAD_UP, 0f);
+							}
 
-					if (povY != controller.povY) {
-						if (controller.povY == 1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_UP;
-							event.code = KeyEvent.KEYCODE_DPAD_DOWN;
-							eventQueue.add(event);
-						} else if (controller.povY == -1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_UP;
-							event.code = KeyEvent.KEYCODE_DPAD_UP;
-							eventQueue.add(event);
-						}
-
-						if (povY == 1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_DOWN;
-							event.code = KeyEvent.KEYCODE_DPAD_DOWN;
-							eventQueue.add(event);
-						} else if (povY == -1f) {
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_DOWN;
-							event.code = KeyEvent.KEYCODE_DPAD_UP;
-							eventQueue.add(event);
-						}
-						controller.povY = povY;
+							if (povY == 1f) {
+								eventQueue.enqueueButtonDown(controller, KeyEvent.KEYCODE_DPAD_DOWN, 1f);
+							} else if (povY == -1f) {
+								eventQueue.enqueueButtonDown(controller, KeyEvent.KEYCODE_DPAD_UP, 1f);
+							}
+							controller.povY = povY;
 
 					}
 				}
 
-				if (controller.hasTriggerAxis()){
-					float lTrigger = motionEvent.getAxisValue(MotionEvent.AXIS_LTRIGGER);
-					float rTrigger = motionEvent.getAxisValue(MotionEvent.AXIS_RTRIGGER);
-					//map axis movement to trigger buttons
-					if (lTrigger != controller.lTrigger){
-						if (lTrigger == 1){
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_DOWN;
-							event.code = KeyEvent.KEYCODE_BUTTON_L2;
-							eventQueue.add(event);
-						} else if (lTrigger == 0){
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_UP;
-							event.code = KeyEvent.KEYCODE_BUTTON_L2;
-							eventQueue.add(event);
-						}
-						controller.lTrigger = lTrigger;
+					if (controller.hasTriggerAxis()){
+						float lTrigger = motionEvent.getAxisValue(MotionEvent.AXIS_LTRIGGER);
+						float rTrigger = motionEvent.getAxisValue(MotionEvent.AXIS_RTRIGGER);
+						//map axis movement to trigger buttons
+						if (lTrigger != controller.lTrigger){
+							if (lTrigger == 1){
+								eventQueue.enqueueButtonDown(controller, KeyEvent.KEYCODE_BUTTON_L2, 1f);
+							} else if (lTrigger == 0){
+								eventQueue.enqueueButtonUp(controller, KeyEvent.KEYCODE_BUTTON_L2, 0f);
+							}
+							controller.lTrigger = lTrigger;
 
 					}
 
-					if (rTrigger != controller.rTrigger){
-						if (rTrigger == 1){
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_DOWN;
-							event.code = KeyEvent.KEYCODE_BUTTON_R2;
-							eventQueue.add(event);
-						} else if (rTrigger == 0){
-							AndroidControllerEvent event = eventPool.obtain();
-							event.controller = controller;
-							event.type = AndroidControllerEvent.BUTTON_UP;
-							event.code = KeyEvent.KEYCODE_BUTTON_R2;
-							eventQueue.add(event);
-						}
-						controller.rTrigger = rTrigger;
+						if (rTrigger != controller.rTrigger){
+							if (rTrigger == 1){
+								eventQueue.enqueueButtonDown(controller, KeyEvent.KEYCODE_BUTTON_R2, 1f);
+							} else if (rTrigger == 0){
+								eventQueue.enqueueButtonUp(controller, KeyEvent.KEYCODE_BUTTON_R2, 0f);
+							}
+							controller.rTrigger = rTrigger;
 
 					}
 				}
 
-				int axisIndex = 0;
+					int axisIndex = 0;
             	for (int axisId: controller.axesIds) {
-					float axisValue = motionEvent.getAxisValue(axisId);
-					if(controller.getAxis(axisIndex) == axisValue) {
+						float axisValue = motionEvent.getAxisValue(axisId);
+						if(controller.getAxis(axisIndex) == axisValue) {
+							axisIndex++;
+							continue;
+						}
+						eventQueue.enqueueAxis(controller, axisIndex, axisValue);
 						axisIndex++;
-						continue;
 					}
-					AndroidControllerEvent event = eventPool.obtain();
-					event.type = AndroidControllerEvent.AXIS;
-					event.controller = controller;
-					event.code = axisIndex;
-					event.axisValue = axisValue;
-					eventQueue.add(event);
-					axisIndex++;
 				}
-			}
 			return true;
 		}
 		return false;
@@ -277,16 +225,12 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 			if (controller.hasTriggerAxis() && (keyCode == KeyEvent.KEYCODE_BUTTON_L2 || keyCode == KeyEvent.KEYCODE_BUTTON_R2)){
 				return true;
 			}
-			synchronized(eventQueue) {
-				AndroidControllerEvent event = eventPool.obtain();
-				event.controller = controller;
+			synchronized(dispatchLock) {
 				if(keyEvent.getAction() == KeyEvent.ACTION_DOWN) {
-					event.type = AndroidControllerEvent.BUTTON_DOWN;
+					eventQueue.enqueueButtonDown(controller, keyCode, 1f);
 				} else {
-					event.type = AndroidControllerEvent.BUTTON_UP;
+					eventQueue.enqueueButtonUp(controller, keyCode, 0f);
 				}
-				event.code = keyCode;
-				eventQueue.add(event);
 			}
 			return keyCode != KeyEvent.KEYCODE_BACK || Gdx.input.isCatchKey(keyCode);
 		} else {
@@ -321,11 +265,8 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 			AndroidController controller = new AndroidController(deviceId, name);
 			controllerMap.put(deviceId, controller);
 			if (sendEvent) {
-				synchronized (eventQueue) {
-					AndroidControllerEvent event = eventPool.obtain();
-					event.type = AndroidControllerEvent.CONNECTED;
-					event.controller = controller;
-					eventQueue.add(event);
+				synchronized (dispatchLock) {
+					eventQueue.enqueueConnected(controller);
 				}
 			} else {
 				controllers.add(controller);
@@ -342,12 +283,9 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 	protected void removeController(int deviceId) {
 		AndroidController controller = controllerMap.remove(deviceId);
 		if(controller != null) {
-			synchronized(eventQueue) {
-				AndroidControllerEvent event = eventPool.obtain();
+			synchronized(dispatchLock) {
 				controller.connected = false;
-				event.type = AndroidControllerEvent.DISCONNECTED;
-				event.controller = controller;
-				eventQueue.add(event);
+				eventQueue.enqueueDisconnected(controller);
 			}
 			Gdx.app.log(TAG, "removed controller '" + controller.getName() + "'");
 		}
@@ -362,14 +300,14 @@ public class AndroidControllers extends AbstractControllerManager implements Lif
 
 	@Override
 	public void addListener (ControllerListener listener) {
-		synchronized(eventQueue) {
+		synchronized(dispatchLock) {
 			listeners.add(listener);
 		}
 	}
 
 	@Override
 	public void removeListener (ControllerListener listener) {
-		synchronized(eventQueue) {
+		synchronized(dispatchLock) {
 			listeners.removeValue(listener, true);
 		}
 	}

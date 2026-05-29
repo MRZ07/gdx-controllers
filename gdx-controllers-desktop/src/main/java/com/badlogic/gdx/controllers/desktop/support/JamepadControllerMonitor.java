@@ -10,12 +10,19 @@ import com.studiohartman.jamepad.ControllerManager;
 import com.studiohartman.jamepad.ControllerUnpluggedException;
 
 public class JamepadControllerMonitor implements Runnable {
+    private static final long POLL_SLEEP_MS = 4L;
+
     private final ControllerManager controllerManager;
     private final ControllerListener listener;
     private final IntMap<Tuple> indexToController
         = new IntMap<>(JamepadControllerManager.jamepadConfiguration.maxNumControllers);
     // temporary array for delaying connect messages
     private final Array<JamepadController> connectedControllers = new Array<JamepadController>();
+    private final Object stateLock = new Object();
+
+    private volatile boolean running = true;
+    private volatile boolean pendingReconcile = false;
+    private Thread pollingThread;
 
     public JamepadControllerMonitor(ControllerManager controllerManager, ControllerListener listener) {
         this.controllerManager = controllerManager;
@@ -24,17 +31,67 @@ public class JamepadControllerMonitor implements Runnable {
         reconcileControllers();
     }
 
+    public void start() {
+        pollingThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (running) {
+                    boolean controllersChanged;
+
+                    synchronized (stateLock) {
+                        controllersChanged = controllerManager.update();
+                    }
+
+                    if (controllersChanged) {
+                        pendingReconcile = true;
+                    }
+
+                    try {
+                        Thread.sleep(POLL_SLEEP_MS);
+                    } catch (InterruptedException ignored) {
+                        // stop requested
+                    }
+                }
+            }
+        }, "gdx-jamepad-monitor");
+        pollingThread.setDaemon(true);
+        pollingThread.start();
+
+        Gdx.app.postRunnable(this);
+    }
+
+    public void stop() {
+        running = false;
+
+        if (pollingThread != null) {
+            pollingThread.interrupt();
+            try {
+                pollingThread.join();
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            pollingThread = null;
+        }
+    }
+
     @Override
     public void run() {
-        boolean controllersChanged = controllerManager.update();
+        if (!running) {
+            return;
+        }
 
-        if (controllersChanged) {
-            reconcileControllers();
+        if (pendingReconcile) {
+            synchronized (stateLock) {
+                reconcileControllers();
+                pendingReconcile = false;
+            }
         }
 
         update();
 
-        Gdx.app.postRunnable(this);
+        if (running) {
+            Gdx.app.postRunnable(this);
+        }
     }
 
     private void reconcileControllers() {
