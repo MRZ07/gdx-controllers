@@ -4,11 +4,11 @@ project.group = 'com.badlogicgames.gdx-controllers'
 
 android {
 
-    compileSdkVersion 29
+    compileSdk 37
 
     defaultConfig {
-        minSdkVersion 16
-        targetSdkVersion 29
+        minSdk 24
+        targetSdk 37
     }
 
     sourceSets {
@@ -21,8 +21,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_7
-        targetCompatibility JavaVersion.VERSION_1_7
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 
     lintOptions {
